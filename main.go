@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"database/sql"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	_ "github.com/go-sql-driver/mysql"
 
 	"log"
@@ -27,20 +31,20 @@ id	username
 2	Two
 */
 
-type user struct {
-	id       int32
-	username string
+type User struct {
+	Id       int32  `json:"id,omitempty"`
+	Username string `json:"username"`
 }
 
 /*	note
 id	user_id	content	created_at
 */
 
-type note struct {
-	id         int32
-	user_id    int32
-	content    string
-	created_at int64
+type Note struct {
+	Id         int32  `json:"id"`
+	User_id    int32  `json:"user_id,omitempty"`
+	Content    string `json:"content"`
+	Created_at int64  `json:"created_at,omitempty"`
 }
 
 func dsn(dbName string) string {
@@ -100,25 +104,89 @@ func main() {
 	defer db.Close()
 	log.Printf("Successfully connected to database")
 
-	note := note{user_id: 1, content: "test_content"}
-	noteInsert(db, note)
+	r := chi.NewRouter()
+	r.Use(middleware.Logger)
+	r.Get("/notes", func(w http.ResponseWriter, r *http.Request) {
+		getUserNotes(w, r, db)
+	})
+	r.Post("/add-note", func(w http.ResponseWriter, r *http.Request) {
+		addNote(w, r, db)
+	})
 
-	// r := chi.NewRouter()
-	// r.Use(middleware.Logger)
-	// r.Get("/add-note", addNote)
-
-	// http.ListenAndServe(":3000", r)
+	http.ListenAndServe(":3000", r)
 }
 
-func addNote(responseWriter http.ResponseWriter, r *http.Request) {
-	responseWriter.Write([]byte("add Note"))
-	// note := note{user_id: 1, content: "test_content"}
-	// noteInsert(db, note)
+func getUserNotes(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	user_idStr := r.URL.Query().Get("user_id")
+	user_id, err := strconv.Atoi(user_idStr)
+	if err != nil {
+		// Handle the error (e.g., return a 400 Bad Request response)
+		http.Error(w, "Invalid user_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	notes, err := selectUserNotes(db, int32(user_id))
+	if err != nil {
+		log.Printf("Error %s while getting user notes", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(notes)
 }
 
-// INSERT INTO note(user_id, content, created_at) VALUES (?, ?, ?)
+func selectUserNotes(db *sql.DB, user_id int32) ([]Note, error) {
+	query :=
+		`SELECT id, content 
+		FROM note
+		WHERE user_id = ?`
+	ctx, cancelfunc := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelfunc()
 
-func noteInsert(db *sql.DB, note note) error {
+	stmt, err := db.PrepareContext(ctx, query)
+	if err != nil {
+		log.Printf("Error %s when preparing SQL statement", err)
+		return []Note{}, err
+	}
+	defer stmt.Close()
+
+	rows, err := stmt.QueryContext(ctx, user_id)
+	if err != nil {
+		return []Note{}, err
+	}
+	defer rows.Close()
+	var notes = []Note{}
+	for rows.Next() {
+		var row Note
+		if err := rows.Scan(&row.Id, &row.Content); err != nil {
+			return []Note{}, err
+		}
+		notes = append(notes, row)
+	}
+	if err := rows.Err(); err != nil {
+		return []Note{}, err
+	}
+	return notes, nil
+}
+
+func addNote(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	if r.Header.Get("Content-Type") != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	var note Note
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&note)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	insertNote(db, note)
+}
+
+func insertNote(db *sql.DB, note Note) error {
 	query := "INSERT INTO note(user_id, content) VALUES (?, ?)"
 	ctx, cancelfunc := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelfunc()
@@ -129,7 +197,7 @@ func noteInsert(db *sql.DB, note note) error {
 	}
 	defer stmt.Close()
 
-	res, err := stmt.ExecContext(ctx, note.user_id, note.content)
+	res, err := stmt.ExecContext(ctx, note.User_id, note.Content)
 	if err != nil {
 		log.Printf("Error %s when inserting row into note table", err)
 		return err
