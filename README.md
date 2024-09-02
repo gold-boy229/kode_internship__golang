@@ -1,0 +1,18 @@
+CURL - добавление записи
+
+curl -X POST http://localhost:3000/add-note -H "Content-Type: application/json" -d '{"user_id":2,"content":"Test insert by second user"}'
+curl -X POST http://localhost:3000/add-note -H "Content-Type: application/json" -d '{"user_id":2,"content":"helo wrld!  whee yoou go?"}'
+
+
+
+CURL - вывод списка записей пользователя
+curl -v -H "Accept: application/json" http://localhost:3000/notes?user_id=1
+curl -v -H "Accept: application/json" http://localhost:3000/notes?user_id=2
+
+
+CURL - тест спеллера
+curl -X GET https://speller.yandex.net/services/spellservice.json/checkText?text=liffe
+
+curl -X POST "https://speller.yandex.net/services/spellservice.json/checkText" -H "Content-Type: application/x-www-form-urlencoded" -d "text=Hello, wrld!"
+
+

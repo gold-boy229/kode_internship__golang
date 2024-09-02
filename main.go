@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"database/sql"
 
@@ -19,10 +23,11 @@ import (
 )
 
 const (
-	username = "test_user"
-	password = "test_password"
-	hostname = "127.0.0.1:3306"
-	dbname   = "kode_internship"
+	username             = "test_user"
+	password             = "test_password"
+	hostname             = "127.0.0.1:3306"
+	dbname               = "kode_internship"
+	YandexSpeller_apiURL = "https://speller.yandex.net/services/spellservice.json/checkText"
 )
 
 /* 	user
@@ -45,6 +50,16 @@ type Note struct {
 	User_id    int32  `json:"user_id,omitempty"`
 	Content    string `json:"content"`
 	Created_at int64  `json:"created_at,omitempty"`
+}
+
+type SpellCheckResponse struct {
+	Code        int      `json:"code"`
+	Pos         int      `json:"pos"`
+	Row         int      `json:"row"`
+	Col         int      `json:"col"`
+	Len         int      `json:"len"`
+	Word        string   `json:"word"`
+	Suggestions []string `json:"s"`
 }
 
 func dsn(dbName string) string {
@@ -183,6 +198,15 @@ func addNote(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
+	valid_content, err := YandexSpeller_API(note.Content)
+	if err != nil {
+		log.Printf("Error in YandexSpeller_API happend %s", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	log.Print("valid_content = ", valid_content)
+
+	note.Content = valid_content
 	insertNote(db, note)
 }
 
@@ -209,4 +233,52 @@ func insertNote(db *sql.DB, note Note) error {
 	}
 	log.Printf("%d note(s) created ", rows)
 	return nil
+}
+
+func YandexSpeller_API(text_to_validate string) (string, error) {
+	formData := url.Values{"text": {text_to_validate}}
+
+	req, err := http.NewRequest("POST", YandexSpeller_apiURL, strings.NewReader(formData.Encode()))
+	if err != nil {
+		log.Println(err)
+		return "", errors.New("Cannot create POST-request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println(err)
+		return "", errors.New("Cannot receive response")
+	}
+	defer resp.Body.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(resp.Body)
+
+	final_text, err := processYandexSpellerResponse(buf, text_to_validate)
+	if err != nil {
+		log.Println(err)
+		return "", errors.New("Error in processYandexSpellerResponse()")
+	}
+
+	return final_text, nil
+}
+
+func processYandexSpellerResponse(buf bytes.Buffer, input_text string) (string, error) {
+	var errors []SpellCheckResponse
+	json.Unmarshal(buf.Bytes(), &errors)
+
+	final_text := ""
+	ptr := 0
+
+	for _, error_i := range errors {
+		final_text += input_text[ptr:error_i.Pos]
+		final_text += error_i.Suggestions[0]
+		ptr = error_i.Pos + error_i.Len
+	}
+
+	final_text += input_text[ptr:]
+
+	return final_text, nil
 }
