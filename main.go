@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -32,13 +33,13 @@ const (
 )
 
 /* 	user
-id	username
-1 	One
-2	Two
+id	username password
+1 	One		 password
+2	Two		 password
 */
 
 type User struct {
-	Id       int32  `json:"id,omitempty"`
+	Id       int    `json:"id,omitempty"`
 	Username string `json:"username"`
 }
 
@@ -47,8 +48,8 @@ id	user_id	content	created_at
 */
 
 type Note struct {
-	Id         int32  `json:"id"`
-	User_id    int32  `json:"user_id,omitempty"`
+	Id         int    `json:"id"`
+	User_id    int    `json:"user_id,omitempty"`
 	Content    string `json:"content"`
 	Created_at int64  `json:"created_at,omitempty"`
 }
@@ -63,6 +64,28 @@ type SpellCheckResponse struct {
 	Suggestions []string `json:"s"`
 }
 
+var (
+	logfile *os.File
+	logger  *log.Logger
+	db      *sql.DB
+)
+
+func init() {
+	var err error
+	logfile, err = os.OpenFile("./logs/0.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logger = log.New(logfile, "INFO: ", log.LstdFlags|log.Lshortfile)
+
+	db, err = dbConnection()
+	if err != nil {
+		logger.Printf("Error %s when getting db connection", err)
+		return
+	}
+	logger.Print("Successfully connected to database")
+}
+
 func dsn(dbName string) string {
 	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, hostname, dbName)
 }
@@ -70,7 +93,7 @@ func dsn(dbName string) string {
 func dbConnection() (*sql.DB, error) {
 	db, err := sql.Open("mysql", dsn(""))
 	if err != nil {
-		log.Printf("Error %s when opening DB\n", err)
+		logger.Printf("Error %s when opening DB\n", err)
 		return nil, err
 	}
 
@@ -79,20 +102,20 @@ func dbConnection() (*sql.DB, error) {
 
 	res, err := db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+dbname)
 	if err != nil {
-		log.Printf("Error %s when creating DB\n", err)
+		logger.Printf("Error %s when creating DB\n", err)
 		return nil, err
 	}
 	no, err := res.RowsAffected()
 	if err != nil {
-		log.Printf("Error %s when fetching rows", err)
+		logger.Printf("Error %s when fetching rows", err)
 		return nil, err
 	}
-	log.Printf("rows affected: %d\n", no)
+	logger.Printf("rows affected: %d\n", no)
 
 	db.Close()
 	db, err = sql.Open("mysql", dsn(dbname))
 	if err != nil {
-		log.Printf("Error %s when opening DB", err)
+		logger.Printf("Error %s when opening DB", err)
 		return nil, err
 	}
 
@@ -104,35 +127,28 @@ func dbConnection() (*sql.DB, error) {
 	defer cancelfunc()
 	err = db.PingContext(ctx)
 	if err != nil {
-		log.Printf("Errors %s pinging DB", err)
+		logger.Printf("Errors %s pinging DB", err)
 		return nil, err
 	}
-	log.Printf("Connected to DB %s successfully\n", dbname)
+	logger.Printf("Connected to DB %s successfully\n", dbname)
 	return db, nil
 }
 
 func main() {
-	db, err := dbConnection()
-	if err != nil {
-		log.Printf("Error %s when getting db connection", err)
-		return
-	}
+	defer logfile.Close()
 	defer db.Close()
-	log.Printf("Successfully connected to database")
 
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Get("/notes", func(w http.ResponseWriter, r *http.Request) {
-		getUserNotes(w, r, db)
-	})
-	r.Post("/add-note", func(w http.ResponseWriter, r *http.Request) {
-		addNote(w, r, db)
-	})
+	log.Print("Server is successfully started and now is running")
 
-	http.ListenAndServe(":3000", r)
+	router := chi.NewRouter()
+	router.Use(middleware.Logger)
+	router.Get("/notes", getUserNotes)
+	router.Post("/add-note", addNote)
+
+	http.ListenAndServe(":3000", router)
 }
 
-func getUserNotes(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func getUserNotes(w http.ResponseWriter, r *http.Request) {
 	user_idStr := r.URL.Query().Get("user_id")
 	user_id, err := strconv.Atoi(user_idStr)
 	if err != nil {
@@ -141,16 +157,16 @@ func getUserNotes(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	isUserValid, err := validateUser(r, db, user_id)
+	isUserValid, err := validateUser(r, user_id)
 	if err != nil || !isUserValid {
-		log.Print("err = ", err, " isUserValid = ", isUserValid)
+		logger.Print("err = ", err, " isUserValid = ", isUserValid)
 		http.Error(w, "Invalid user credentials", http.StatusBadRequest)
 		return
 	}
 
-	notes, err := selectUserNotes(db, int32(user_id))
+	notes, err := selectUserNotes(int(user_id))
 	if err != nil {
-		log.Printf("Error %s while getting user notes", err)
+		logger.Printf("Error %s while getting user notes", err)
 		return
 	}
 
@@ -158,7 +174,7 @@ func getUserNotes(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	json.NewEncoder(w).Encode(notes)
 }
 
-func selectUserNotes(db *sql.DB, user_id int32) ([]Note, error) {
+func selectUserNotes(user_id int) ([]Note, error) {
 	query :=
 		`SELECT id, content 
 		FROM note
@@ -168,7 +184,7 @@ func selectUserNotes(db *sql.DB, user_id int32) ([]Note, error) {
 
 	stmt, err := db.PrepareContext(ctx, query)
 	if err != nil {
-		log.Printf("Error %s when preparing SQL statement", err)
+		logger.Printf("Error %s when preparing SQL statement", err)
 		return []Note{}, err
 	}
 	defer stmt.Close()
@@ -192,7 +208,7 @@ func selectUserNotes(db *sql.DB, user_id int32) ([]Note, error) {
 	return notes, nil
 }
 
-func addNote(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+func addNote(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Content-Type") != "application/json" {
 		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 		return
@@ -206,47 +222,47 @@ func addNote(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	isUserValid, err := validateUser(r, db, int(note.User_id))
+	isUserValid, err := validateUser(r, int(note.User_id))
 	if err != nil || !isUserValid {
-		log.Print("err = ", err, " isUserValid = ", isUserValid)
+		logger.Print("err = ", err, " isUserValid = ", isUserValid)
 		http.Error(w, "Invalid user credentials", http.StatusBadRequest)
 		return
 	}
 
 	valid_content, err := YandexSpeller_API(note.Content)
 	if err != nil {
-		log.Printf("Error in YandexSpeller_API happend %s", err)
+		logger.Printf("Error in YandexSpeller_API happend %s", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	log.Print("valid_content = ", valid_content)
+	logger.Print("valid_content = ", valid_content)
 
 	note.Content = valid_content
-	insertNote(db, note)
+	insertNote(note)
 }
 
-func insertNote(db *sql.DB, note Note) error {
+func insertNote(note Note) error {
 	query := "INSERT INTO note(user_id, content) VALUES (?, ?)"
 	ctx, cancelfunc := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelfunc()
 	stmt, err := db.PrepareContext(ctx, query)
 	if err != nil {
-		log.Printf("Error %s when preparing SQL statement", err)
+		logger.Printf("Error %s when preparing SQL statement", err)
 		return err
 	}
 	defer stmt.Close()
 
 	res, err := stmt.ExecContext(ctx, note.User_id, note.Content)
 	if err != nil {
-		log.Printf("Error %s when inserting row into note table", err)
+		logger.Printf("Error %s when inserting row into note table", err)
 		return err
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		log.Printf("Error %s when finding rows affected", err)
+		logger.Printf("Error %s when finding rows affected", err)
 		return err
 	}
-	log.Printf("%d note(s) created ", rows)
+	logger.Printf("%d note(s) created ", rows)
 	return nil
 }
 
@@ -255,7 +271,7 @@ func YandexSpeller_API(text_to_validate string) (string, error) {
 
 	req, err := http.NewRequest("POST", YandexSpeller_apiURL, strings.NewReader(formData.Encode()))
 	if err != nil {
-		log.Println(err)
+		logger.Println(err)
 		return "", errors.New("Cannot create POST-request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -263,7 +279,7 @@ func YandexSpeller_API(text_to_validate string) (string, error) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Println(err)
+		logger.Println(err)
 		return "", errors.New("Cannot receive response")
 	}
 	defer resp.Body.Close()
@@ -273,7 +289,7 @@ func YandexSpeller_API(text_to_validate string) (string, error) {
 
 	final_text, err := processYandexSpellerResponse(buf, text_to_validate)
 	if err != nil {
-		log.Println(err)
+		logger.Println(err)
 		return "", errors.New("Error in processYandexSpellerResponse()")
 	}
 
@@ -304,7 +320,7 @@ func getCredentialsFromAuthHeader(r *http.Request) (string, string, error) {
 		return "", "", errors.New("Unauthorized")
 	}
 
-	log.Print("authHeader = ", authHeader)
+	logger.Print("authHeader = ", authHeader)
 
 	// authHeader = Basic VHdvOnBhc3N3b3Jk
 	parts := strings.Split(authHeader, " ")
@@ -312,32 +328,32 @@ func getCredentialsFromAuthHeader(r *http.Request) (string, string, error) {
 		return "", "", errors.New("Unauthorized")
 	}
 
-	log.Print("parts = ", parts)
+	logger.Print("parts = ", parts)
 
 	decoded, err := base64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
 		return "", "", errors.New("Unauthorized")
 	}
 
-	log.Print("decoded = ", decoded)
+	logger.Print("decoded = ", decoded)
 
 	credentials := strings.SplitN(string(decoded), ":", 2)
 	if len(credentials) != 2 {
 		return "", "", errors.New("Unauthorized")
 	}
 
-	log.Print("credentials = ", credentials)
+	logger.Print("credentials = ", credentials)
 
 	username := credentials[0]
 	password := credentials[1]
 
-	log.Print("username = ", username)
-	log.Print("password = ", password)
+	logger.Print("username = ", username)
+	logger.Print("password = ", password)
 
 	return username, password, nil
 }
 
-func validateUser(r *http.Request, db *sql.DB, user_id int) (bool, error) {
+func validateUser(r *http.Request, user_id int) (bool, error) {
 	var isUserValid bool
 
 	username, password, err := getCredentialsFromAuthHeader(r)
