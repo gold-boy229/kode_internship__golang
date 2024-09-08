@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -140,6 +141,13 @@ func getUserNotes(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
+	isUserValid, err := validateUser(r, db, user_id)
+	if err != nil || !isUserValid {
+		log.Print("err = ", err, " isUserValid = ", isUserValid)
+		http.Error(w, "Invalid user credentials", http.StatusBadRequest)
+		return
+	}
+
 	notes, err := selectUserNotes(db, int32(user_id))
 	if err != nil {
 		log.Printf("Error %s while getting user notes", err)
@@ -195,6 +203,13 @@ func addNote(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	err := decoder.Decode(&note)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	isUserValid, err := validateUser(r, db, int(note.User_id))
+	if err != nil || !isUserValid {
+		log.Print("err = ", err, " isUserValid = ", isUserValid)
+		http.Error(w, "Invalid user credentials", http.StatusBadRequest)
 		return
 	}
 
@@ -281,4 +296,65 @@ func processYandexSpellerResponse(buf bytes.Buffer, input_text string) (string, 
 	final_text += input_text[ptr:]
 
 	return final_text, nil
+}
+
+func getCredentialsFromAuthHeader(r *http.Request) (string, string, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", "", errors.New("Unauthorized")
+	}
+
+	log.Print("authHeader = ", authHeader)
+
+	// authHeader = Basic VHdvOnBhc3N3b3Jk
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || parts[0] != "Basic" {
+		return "", "", errors.New("Unauthorized")
+	}
+
+	log.Print("parts = ", parts)
+
+	decoded, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", "", errors.New("Unauthorized")
+	}
+
+	log.Print("decoded = ", decoded)
+
+	credentials := strings.SplitN(string(decoded), ":", 2)
+	if len(credentials) != 2 {
+		return "", "", errors.New("Unauthorized")
+	}
+
+	log.Print("credentials = ", credentials)
+
+	username := credentials[0]
+	password := credentials[1]
+
+	log.Print("username = ", username)
+	log.Print("password = ", password)
+
+	return username, password, nil
+}
+
+func validateUser(r *http.Request, db *sql.DB, user_id int) (bool, error) {
+	var isUserValid bool
+
+	username, password, err := getCredentialsFromAuthHeader(r)
+	if err != nil {
+		return false, err
+	}
+
+	query := `
+		SELECT exists(
+			SELECT 1
+			FROM user
+			WHERE id = ? AND username = ? AND password = ?
+		)`
+
+	if err := db.QueryRow(query, user_id, username, password).Scan(&isUserValid); err != nil {
+		return false, err
+	}
+
+	return isUserValid, nil
 }
